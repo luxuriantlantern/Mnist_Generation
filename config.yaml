@@ -1,0 +1,16 @@
+train:
+    batch_size: 64
+    num_epochs: 50
+    lr: 0.001
+    device: cuda
+    path: data
+    dataset: MNIST
+    image_size: 28
+    num_classes: 10
+    input_dim: 1
+    hidden_dim: 256
+    num_layers: 4
+    dropout: 0.1
+    num_heads: 8
+    log_dir: runs
+    pth_dir: pth
