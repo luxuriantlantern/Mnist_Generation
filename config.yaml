@@ -1,5 +1,5 @@
 train:
-    batch_size: 64
+    batch_size: 96
     num_epochs: 50
     lr: 0.001
     device: cuda
@@ -13,4 +13,5 @@ train:
     dropout: 0.1
     num_heads: 8
     log_dir: runs
-    pth_dir: pth
+    pth_dir: pth_256_4
+    start_epoch: 10

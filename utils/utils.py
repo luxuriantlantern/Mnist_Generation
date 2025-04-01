@@ -10,13 +10,7 @@ from transformers.pytorch_utils import meshgrid
 from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.path import AffineProbPath
 from torchdiffeq import odeint
-from flow_matching.utils import ModelWrapper
 from flow_matching.solver import ODESolver, Solver
-
-class WrapperModel(ModelWrapper):
-    def forward(self, x:torch.Tensor, coords:torch.Tensor, t:torch.tensor, class_idx : torch.tensor) -> torch.Tensor:
-        return self.model(x, coords, t, class_idx)
-
 
 @torch.no_grad()
 def draw(model: torch.nn.Module, conf: OmegaConf) -> None:
@@ -24,66 +18,102 @@ def draw(model: torch.nn.Module, conf: OmegaConf) -> None:
     image_size = conf["train"]["image_size"]
     device = conf["train"]["device"]
 
-    # 确保模型在正确的设备上
     model.to(device)
-    model.eval()  # 设置为评估模式
+    model.eval()
 
-    # 时间步长
-    t_span = torch.linspace(0, 1, 10).to(device)
+    # 生成100个时间步对应的时间点（共101个点，包含t=1.0）
+    num_steps = 100
+    t_span = torch.linspace(0, 1, num_steps + 1).to(device)  # [0.0, 0.01, ..., 1.0]
 
-    # 创建画布
-    fig, axes = plt.subplots(num_classes, 10, figsize=(20, 2 * num_classes))
+    # 创建画布（11列对应t=0.0到1.0）
+    fig, axes = plt.subplots(num_classes, 11, figsize=(22, 2 * num_classes))
     if num_classes == 1:
-        axes = axes[np.newaxis, :]  # 单类别时确保axes是二维的
+        axes = axes[np.newaxis, :]  # 确保单类别时axes维度正确
 
-    # 生成坐标网格
-    grid = torch.arange(image_size, device=device)
-    x, y = torch.meshgrid(grid, grid, indexing="ij")
-    coords = torch.stack([x, y], dim=-1)  # [H, W, 2]
-    coords = coords.reshape(1, image_size * image_size, 2).expand(num_classes, -1, -1)
-    coords = coords.float() / image_size  # 归一化到[0, 1]
-    coords.to(device)
+    # 生成坐标网格（归一化到[0,1]）
+    grid = torch.arange(image_size)
+    x, y = meshgrid(grid, grid, indexing="ij")
+    coords = torch.stack([x, y], dim=-1).float()
+    coords = coords / image_size
 
-    # 初始噪声和类别索引
     x_t = torch.rand((num_classes, image_size * image_size, 1), device=device)
     class_idx = torch.arange(num_classes, device=device).view(-1, 1, 1)
 
-    # 存储所有时间步的结果
     all_steps = []
+    all_steps.append(x_t.detach().cpu().numpy())  # 保存初始状态t=0.0
 
-    # 逐步计算并更新
-    for i, t in enumerate(t_span):
-        # 计算速度场vt
-        t_tensor = t.expand(num_classes, 1, 1)  # [num_classes, 1, 1]
-        with torch.no_grad():
-            vt = model(x_t, coords, t_tensor, class_idx)
+    # # 逐步积分（欧拉方法）
+    # for i in range(num_steps):
+    #     t_current = t_span[i]
+    #     t_next = t_span[i + 1]
+    #     dt = (t_next - t_current).item()
+    #
+    #     # 准备时间张量 [num_classes, 1, 1]
+    #     t_tensor = t_current.view(1, 1, 1).expand(num_classes, 1, 1)
+    #
+    #     batch_coords = coords.unsqueeze(0).reshape(1, -1, 2).repeat(num_classes, 1, 1).to(device)
+    #
+    #     # 调用模型（注意参数顺序与训练一致）
+    #     vt = model(x=x_t, t=t_tensor, coords=batch_coords, class_idx=class_idx)
+    #
+    #     # 更新图像
+    #     x_t = x_t + vt * dt
+    #
+    #     # 每10步保存一次结果（对应t=0.1,0.2,...,1.0）
+    #     if (i + 1) % 10 == 0:
+    #         all_steps.append(x_t.detach().cpu().numpy())
+    #
+    # # 转换为numpy并reshape
+    # sol = np.stack(all_steps)  # [11, num_classes, H*W, 1]
+    # sol = sol.reshape(11, num_classes, image_size, image_size)
+    #
+    # # 可视化（灰度图）
+    # for c in range(num_classes):
+    #     for t_idx in range(11):
+    #         ax = axes[c, t_idx]
+    #         img = sol[t_idx, c]
+    #         img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
+    #         ax.imshow(img_norm, cmap='gray', vmin=0, vmax=1)
+    #         ax.axis('off')
+    #         if c == 0:
+    #             ax.set_title(f't={t_idx * 0.1:.1f}')
+    #
+    # plt.tight_layout()
+    # plt.show()
 
-        # 更新图像 (这里使用简单的欧拉方法)
-        dt = 0.1 if i == 0 else (t_span[i] - t_span[i - 1]).item()
-        x_t = x_t + vt * dt
+    coords = coords.unsqueeze(0).reshape(1, -1, 2).repeat(num_classes, 1, 1).to(device)
 
-        # 存储当前步的结果
-        all_steps.append(x_t.detach().cpu().numpy())
+    def ode_func(t:torch.Tensor, x:torch.Tensor) -> torch.Tensor:
+        t_expanded = t.expand(x.size(0))[:, None, None]
+        return model(x, coords, t_expanded, class_idx)
 
-    # 转换为numpy并reshape以便可视化
-    sol = np.stack(all_steps)  # [time_steps, num_classes, H*W, 1]
-    sol = sol.reshape(10, num_classes, image_size, image_size)
+    # 生成11个均匀分布的时间点(t=0.0到t=1.0)
+    t_eval = torch.linspace(0.0, 1.0, 11, device=device)
 
-    # 可视化 - 修改为灰度显示
+    # 解ODE（自适应步长），获取所有时间点的结果
+    generated = odeint(
+        ode_func,
+        x_t,
+        t_eval,
+        rtol=1e-5,
+        atol=1e-5,
+        method='dopri5'
+    )
+
+    # 转换为numpy并reshape
+    generated_np = generated.detach().cpu().numpy()  # 形状为[11, num_classes, H*W, 1]
+    images = generated_np.reshape(11, num_classes, image_size, image_size)
+
+    # 可视化所有时间点的图像
     for c in range(num_classes):
-        for t in range(10):
-            ax = axes[c, t]
-            img = sol[t, c]
-
-            # 归一化到[0,1]范围
-            img_normalized = (img - img.min()) / (img.max() - img.min() + 1e-8)
-
-            # 使用灰度colormap
-            ax.imshow(img_normalized, cmap='gray', vmin=0, vmax=1)
-            ax.set_xticks([])
-            ax.set_yticks([])
+        for t_idx in range(11):
+            ax = axes[c, t_idx]
+            img = images[t_idx, c]
+            img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
+            ax.imshow(img_norm, cmap='gray', vmin=0, vmax=1)
+            ax.axis('off')
             if c == 0:
-                ax.set_title(f't={t_span[t].item():.1f}')
+                ax.set_title(f't={t_idx * 0.1:.1f}')
 
     plt.tight_layout()
     plt.show()

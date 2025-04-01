@@ -32,6 +32,7 @@ def train(conf : OmegaConf) -> None:
     dropout = conf["train"]["dropout"]
     log_dir = conf["train"]["log_dir"]
     pth_dir = conf["train"]["pth_dir"]
+    start_epoch = conf["train"]["start_epoch"]
 
     writer = SummaryWriter(log_dir=log_dir)
 
@@ -57,6 +58,7 @@ def train(conf : OmegaConf) -> None:
                         num_heads = num_heads,
                         num_classes = num_classes,
                         dropout = dropout)
+    # model.load_state_dict(torch.load(pth_dir + f"/model_epoch_{start_epoch}.pth", weights_only=True))
     model = model.to(device)
 
     optim = torch.optim.SGD(model.parameters(), lr=lr)
@@ -69,7 +71,7 @@ def train(conf : OmegaConf) -> None:
     coords = coords / image_size
 
     global_step = 0
-    for _ in range(num_epochs):
+    for _ in range(start_epoch, num_epochs):
         model.train()
         epoch_loss = 0
         start_time = time.time()
